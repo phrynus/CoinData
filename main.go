@@ -233,9 +233,18 @@ func (a *MarketAnalyzer) checkPastPrediction(currentData *CoinData, now time.Tim
 		// 计算价格变化
 		priceChange := (currentData.Price - closestRecord.Price) / closestRecord.Price
 
+		// 判断是否为平区间
+		if closestRecord.Score >= 45 && closestRecord.Score <= 55 {
+			timeStr := closestRecord.Timestamp.Format("2006-01-02 15:04:05")
+			log.Printf("\n10分钟前预测验证 [%s]:", timeStr)
+			log.Printf("预测分数: %.1f/100 (平区间，不计入胜率)\n", closestRecord.Score)
+			log.Printf("实际价格变化: %.2f%%\n", priceChange*100)
+			return
+		}
+
 		// 确定预测是否正确
 		isCorrect := false
-		if (closestRecord.Score > 50 && priceChange > 0) || (closestRecord.Score < 50 && priceChange < 0) {
+		if (closestRecord.Score > 55 && priceChange > 0) || (closestRecord.Score < 45 && priceChange < 0) {
 			isCorrect = true
 			a.winCount++
 		}
@@ -243,7 +252,7 @@ func (a *MarketAnalyzer) checkPastPrediction(currentData *CoinData, now time.Tim
 
 		// 使用if-else替代三元运算符
 		expectedDirection := "下跌"
-		if closestRecord.Score > 50 {
+		if closestRecord.Score > 55 {
 			expectedDirection = "上涨"
 		}
 
@@ -260,10 +269,8 @@ func (a *MarketAnalyzer) checkPastPrediction(currentData *CoinData, now time.Tim
 		// 输出验证结果
 		timeStr := closestRecord.Timestamp.Format("2006-01-02 15:04:05")
 		log.Printf("\n10分钟前预测验证 [%s]:", timeStr)
-		log.Printf("预测分数: %.1f/100 (预期%s)\n",
-			closestRecord.Score, expectedDirection)
-		log.Printf("实际价格变化: %.2f%% (%s)\n",
-			priceChange*100, actualDirection)
+		log.Printf("预测分数: %.1f/100 (预期%s)\n", closestRecord.Score, expectedDirection)
+		log.Printf("实际价格变化: %.2f%% (%s)\n", priceChange*100, actualDirection)
 		log.Printf("预测结果: %s\n", predictionResult)
 	}
 }
