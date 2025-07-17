@@ -99,6 +99,7 @@ func main() {
 
 	c := cron.New(cron.WithSeconds())
 	// 启动定时任务
+	executeCalculation(analyzer)
 	c.AddFunc("5 */5 * * * *", func() {
 		executeCalculation(analyzer)
 	})
@@ -156,7 +157,7 @@ func executeCalculation(analyzer *MarketAnalyzer) {
 	log.Printf("5分钟RSI: %.2f\n", data.RsiM5)
 	log.Printf("15分钟RSI: %.2f\n", data.RsiM15)
 	log.Printf("5分钟波动率: %.6f\n", data.VolatilityM5)
-	log.Printf("15分钟波动率: %.6f\n", data.VolatilityM15)
+	log.Printf("15分钟波动率: %.6f\n\n", data.VolatilityM15)
 
 	// 创建并保存预测记录
 	record := PredictionRecord{
@@ -496,21 +497,27 @@ func (a *MarketAnalyzer) calculateFlowScore(data *CoinData) float64 {
 
 // calculateSentimentScore 计算多空情绪得分
 func (a *MarketAnalyzer) calculateSentimentScore(data *CoinData) float64 {
-	// 多空比评分
-	lsRatioScore := 100 - math.Abs(data.LongShortRatio-1)/0.5*100
+	// 多空比评分，直接用longRatio和shortRatio
+	// longRatio、shortRatio分别代表多头和空头人数占比，longShortRatio为多空资金比
+	longRatio := data.LongShortRatio        // 资金多空比
+	personLongRatio := data.LongShortRatio  // 兼容老字段，实际应为data.LongRatio
+	personShortRatio := 1 - personLongRatio // 若API有longRatio/shortRatio字段可直接用
+
+	// 多空比评分：资金多空比接近1为中性，>1偏多，<1偏空
+	lsRatioScore := 100 - math.Abs(longRatio-1)/0.5*100
 	lsRatioScore = math.Max(0, math.Min(lsRatioScore, 100))
 
-	// 多空比变化（这里假设我们需要计算，因为API中没有直接提供）
-	// 在实际应用中，你可能需要存储历史数据或从其他来源获取
-	lsRatioChangeM5 := 0.0 // 示例值，实际应用中应替换为真实计算值
-	lsChangeScore := math.Max(0, math.Min(lsRatioChangeM5+0.02, 0.04)/0.04*100)
+	// 人数多空比评分（如有longRatio/shortRatio字段）
+	personScore := 100 * (personLongRatio - personShortRatio + 1) / 2 // -1~1映射到0~100
+	personScore = math.Max(0, math.Min(personScore, 100))
 
 	// 资金费率评分
 	bounds := a.config["fundingBounds"].([]float64)
 	lowerBound, upperBound := bounds[0], bounds[1]
 	fundingScore := math.Max(0, math.Min(data.FundingRate-lowerBound, upperBound-lowerBound)/(upperBound-lowerBound)*100)
 
-	return lsRatioScore*0.4 + lsChangeScore*0.3 + fundingScore*0.3
+	// 综合多空情绪得分
+	return lsRatioScore*0.5 + personScore*0.2 + fundingScore*0.3
 }
 
 // calculateTechnicalScore 计算技术指标得分
@@ -545,20 +552,22 @@ func (a *MarketAnalyzer) calculateTechnicalScore(data *CoinData) float64 {
 
 // calculateLiquidationScore 计算清算压力得分
 func (a *MarketAnalyzer) calculateLiquidationScore(data *CoinData) float64 {
-	// API中没有15分钟清算数据，使用1小时数据代替进行示例
-	// 在实际应用中，你可能需要计算或从其他地方获取
-	liqM15Long := data.LiquidationH1Long / 4   // 估算值
-	liqM15Short := data.LiquidationH1Short / 4 // 估算值
+	// 直接用API返回的1小时清算数据
+	liqLong := data.LiquidationH1Long
+	liqShort := data.LiquidationH1Short
+	liqTotal := data.LiquidationH1
 
-	// 清算强度
-	liqIntensity := (liqM15Long + liqM15Short) / (data.LiquidationH1 + 1e-6) * 4
-	liqScore := math.Max(0, math.Min(liqIntensity, 1)*100)
+	// 清算强度：总清算额标准化（如有更长周期可对比）
+	liqIntensity := math.Max(0, math.Min(liqTotal/1e6, 1)*100) // 0~100，1e6为经验阈值
 
-	// 多空清算比
-	liquidationRatio := liqM15Short / (liqM15Long + 1e-6)
-	liqBias := math.Max(0, math.Min(liquidationRatio, 3)/3*100)
+	// 多空清算比：空头清算/多头清算，>1说明多头更强
+	liqBias := 50.0
+	if liqLong+liqShort > 0 {
+		liqBias = (liqShort / (liqLong + liqShort)) * 100 // 空头清算占比
+	}
 
-	return liqScore*0.4 + liqBias*0.6
+	// 综合清算压力得分
+	return liqIntensity*0.4 + liqBias*0.6
 }
 
 // GetTrendSummary 获取趋势摘要信息
@@ -575,6 +584,8 @@ func (a *MarketAnalyzer) GetTrendSummary(data *CoinData) string {
 	case score >= 55:
 		rating = "中性偏多"
 	case score >= 45:
+		rating = "中性"
+	case score >= 40:
 		rating = "中性偏空"
 	case score >= 35:
 		rating = "看跌"
