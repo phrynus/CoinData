@@ -100,7 +100,7 @@ func main() {
 	c := cron.New(cron.WithSeconds())
 	// 启动定时任务
 	executeCalculation(analyzer)
-	c.AddFunc("5 */5 * * * *", func() {
+	c.AddFunc("5 * * * * *", func() {
 		executeCalculation(analyzer)
 	})
 	c.Start()
@@ -149,15 +149,15 @@ func executeCalculation(analyzer *MarketAnalyzer) {
 	log.Printf("清算压力: %.1f/100\n", liquidationScore)
 
 	// 输出原始指标值
-	log.Printf("5分钟价格变化: %.2f%%\n", data.PriceChangeM5)
-	log.Printf("15分钟价格变化: %.2f%%\n", data.PriceChangeM15)
-	log.Printf("30分钟价格变化: %.2f%%\n", data.PriceChangeM30)
-	log.Printf("多空比: %.4f\n", data.LongShortRatio)
-	log.Printf("资金费率: %.6f\n", data.FundingRate)
-	log.Printf("5分钟RSI: %.2f\n", data.RsiM5)
-	log.Printf("15分钟RSI: %.2f\n", data.RsiM15)
-	log.Printf("5分钟波动率: %.6f\n", data.VolatilityM5)
-	log.Printf("15分钟波动率: %.6f\n\n", data.VolatilityM15)
+	// log.Printf("5分钟价格变化: %.2f%%\n", data.PriceChangeM5)
+	// log.Printf("15分钟价格变化: %.2f%%\n", data.PriceChangeM15)
+	// log.Printf("30分钟价格变化: %.2f%%\n", data.PriceChangeM30)
+	// log.Printf("多空比: %.4f\n", data.LongShortRatio)
+	// log.Printf("资金费率: %.6f\n", data.FundingRate)
+	// log.Printf("5分钟RSI: %.2f\n", data.RsiM5)
+	// log.Printf("15分钟RSI: %.2f\n", data.RsiM15)
+	// log.Printf("5分钟波动率: %.6f\n", data.VolatilityM5)
+	// log.Printf("15分钟波动率: %.6f\n\n", data.VolatilityM15)
 
 	// 创建并保存预测记录
 	record := PredictionRecord{
