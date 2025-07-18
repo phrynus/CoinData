@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -83,7 +84,14 @@ type MarketAnalyzer struct {
 	// 胜率统计
 	winCount   int
 	totalCount int
+	// 极端信号胜率统计 (score > 60 || score < 40)
+	extremeWinCount   int
+	extremeTotalCount int
 }
+
+var (
+	dingWebhook = "https://oapi.dingtalk.com/robot/send?access_token=dc477bf40c7be545e31429d962c3c28946a6da114c7a9c75a4bea55f4d7a18a8"
+)
 
 func init() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
@@ -99,8 +107,8 @@ func main() {
 
 	c := cron.New(cron.WithSeconds())
 	// 启动定时任务
-	executeCalculation(analyzer)
-	c.AddFunc("5 * * * * *", func() {
+	// executeCalculation(analyzer)
+	c.AddFunc("2 * * * * *", func() {
 		executeCalculation(analyzer)
 	})
 	c.Start()
@@ -148,6 +156,13 @@ func executeCalculation(analyzer *MarketAnalyzer) {
 	log.Printf("技术指标: %.1f/100\n", technicalScore)
 	log.Printf("清算压力: %.1f/100\n", liquidationScore)
 
+	if score > 65 || score < 35 {
+		err := SendDingTalkCustomMessage("BTC趋势预测", summary)
+		if err != nil {
+			log.Printf("发送钉钉消息失败: %v\n", err)
+		}
+	}
+
 	// 输出原始指标值
 	// log.Printf("5分钟价格变化: %.2f%%\n", data.PriceChangeM5)
 	// log.Printf("15分钟价格变化: %.2f%%\n", data.PriceChangeM15)
@@ -189,7 +204,16 @@ func executeCalculation(analyzer *MarketAnalyzer) {
 		log.Printf("当前预测胜率: %.1f%% (正确: %d, 总计: %d)\n",
 			winRate, analyzer.winCount, analyzer.totalCount)
 	} else {
-		log.Println("尚无足够历史数据计算胜率\n")
+		log.Println("尚无足够历史数据计算胜率")
+	}
+
+	// 输出极端信号胜率 (score > 60 || score < 40)
+	if analyzer.extremeTotalCount > 0 {
+		extremeWinRate := float64(analyzer.extremeWinCount) / float64(analyzer.extremeTotalCount) * 100
+		log.Printf("极端信号胜率: %.1f%% (正确: %d, 总计: %d)\n\n",
+			extremeWinRate, analyzer.extremeWinCount, analyzer.extremeTotalCount)
+	} else {
+		log.Println("尚无足够极端信号数据计算胜率\n")
 	}
 }
 
@@ -233,15 +257,6 @@ func (a *MarketAnalyzer) checkPastPrediction(currentData *CoinData, now time.Tim
 		// 计算价格变化
 		priceChange := (currentData.Price - closestRecord.Price) / closestRecord.Price
 
-		// 判断是否为平区间
-		if closestRecord.Score >= 45 && closestRecord.Score <= 55 {
-			timeStr := closestRecord.Timestamp.Format("2006-01-02 15:04:05")
-			log.Printf("\n10分钟前预测验证 [%s]:", timeStr)
-			log.Printf("预测分数: %.1f/100 (平区间，不计入胜率)\n", closestRecord.Score)
-			log.Printf("实际价格变化: %.2f%%\n", priceChange*100)
-			return
-		}
-
 		// 确定预测是否正确
 		isCorrect := false
 		if (closestRecord.Score > 55 && priceChange > 0) || (closestRecord.Score < 45 && priceChange < 0) {
@@ -249,6 +264,15 @@ func (a *MarketAnalyzer) checkPastPrediction(currentData *CoinData, now time.Tim
 			a.winCount++
 		}
 		a.totalCount++
+
+		// 检查是否为极端信号 (score > 60 || score < 40)
+		isExtreme := closestRecord.Score > 60 || closestRecord.Score < 40
+		if isExtreme {
+			if isCorrect {
+				a.extremeWinCount++
+			}
+			a.extremeTotalCount++
+		}
 
 		// 使用if-else替代三元运算符
 		expectedDirection := "下跌"
@@ -277,20 +301,22 @@ func (a *MarketAnalyzer) checkPastPrediction(currentData *CoinData, now time.Tim
 
 // NewMarketAnalyzer 创建新的市场分析器
 func NewMarketAnalyzer() *MarketAnalyzer {
-	// 默认权重配置
+	// 优化后的权重配置 - 针对10分钟短期走势
 	defaultWeights := map[string]float64{
-		"price":       0.20, // 价格动量权重
-		"flow":        0.25, // 资金流向权重
-		"sentiment":   0.20, // 多空情绪权重
-		"technical":   0.15, // 技术指标权重
-		"liquidation": 0.10, // 清算压力权重
+		"price":       0.30, // 增加价格动量权重，短期内价格趋势更重要
+		"flow":        0.30, // 增加资金流向权重，短期内买卖力量对价格影响明显
+		"sentiment":   0.15, // 降低多空情绪权重，短期内波动快
+		"technical":   0.20, // 增加技术指标权重，短期技术突破更有意义
+		"liquidation": 0.05, // 降低清算压力权重，除非有大量清算
 	}
 
-	// 其他配置参数
+	// 调整配置参数 - 针对更敏感的短期波动
 	defaultConfig := map[string]interface{}{
-		"priceChangeBounds": []float64{-0.3, 0.3},       // 价格变化范围
-		"volChangeBounds":   []float64{-0.5, 0.5},       // 成交量变化范围
-		"fundingBounds":     []float64{-0.0002, 0.0002}, // 资金费率范围
+		"priceChangeBounds":  []float64{-0.2, 0.2},       // 调窄价格变化范围，更敏感
+		"volChangeBounds":    []float64{-0.7, 0.7},       // 扩大成交量变化范围，短期内波动大
+		"fundingBounds":      []float64{-0.0002, 0.0002}, // 保持资金费率范围
+		"shortTermIndicator": true,                       // 短期指标偏好
+		"timeframe":          10,                         // 预测时间框架(分钟)
 	}
 
 	return &MarketAnalyzer{
@@ -299,6 +325,8 @@ func NewMarketAnalyzer() *MarketAnalyzer {
 		predictionHistory: make([]PredictionRecord, 0, 100), // 初始容量为100的历史记录
 		winCount:          0,
 		totalCount:        0,
+		extremeWinCount:   0,
+		extremeTotalCount: 0,
 	}
 }
 
@@ -454,8 +482,8 @@ func (a *MarketAnalyzer) CalculateTrendScore(data *CoinData) float64 {
 
 // calculatePriceScore 计算价格动量得分
 func (a *MarketAnalyzer) calculatePriceScore(data *CoinData) float64 {
-	// 价格变化权重
-	priceWeights := []float64{0.3, 0.4, 0.3}
+	// 价格变化权重 - 调整为更看重近期变化
+	priceWeights := []float64{0.6, 0.3, 0.1} // 更强调5分钟价格变化
 	priceChanges := []float64{data.PriceChangeM5, data.PriceChangeM15, data.PriceChangeM30}
 
 	bounds := a.config["priceChangeBounds"].([]float64)
@@ -468,6 +496,20 @@ func (a *MarketAnalyzer) calculatePriceScore(data *CoinData) float64 {
 		priceMomentum += normalized * priceWeights[i]
 	}
 
+	// 趋势加速度 - 判断短期趋势是否加速
+	acceleration := 0.0
+	if math.Abs(data.PriceChangeM5) > math.Abs(data.PriceChangeM15)/3 {
+		// 5分钟价格变化比15分钟平均变化更大，说明趋势正在加速
+		if (data.PriceChangeM5 > 0 && data.PriceChangeM15 > 0) ||
+			(data.PriceChangeM5 < 0 && data.PriceChangeM15 < 0) {
+			// 同向加速
+			acceleration = 15.0
+		} else {
+			// 反向加速（可能是反转）
+			acceleration = -15.0
+		}
+	}
+
 	// 趋势一致性
 	consistency := 1.0
 	if (data.PriceChangeM5 > 0 && data.PriceChangeM15 > 0) || (data.PriceChangeM5 < 0 && data.PriceChangeM15 < 0) {
@@ -476,85 +518,179 @@ func (a *MarketAnalyzer) calculatePriceScore(data *CoinData) float64 {
 		consistency = 0.8 // 反向减分
 	}
 
-	return priceMomentum * consistency
+	// 加入加速度因素
+	return (priceMomentum * consistency) + acceleration
 }
 
 // calculateFlowScore 计算资金流向得分
 func (a *MarketAnalyzer) calculateFlowScore(data *CoinData) float64 {
-	// 买卖力量：买盘占比
-	buyPower := data.Buy5m / (data.Buy5m + data.Sell5m + 1e-6) * 100
+	// 买卖力量：买盘占比 - 标准化到40-60区间
+	buyPower := 0.0
+	if data.Buy5m+data.Sell5m > 0 {
+		// 买盘占比转换到40-60区间，使其不会产生过于极端的值
+		buyRatio := data.Buy5m / (data.Buy5m + data.Sell5m)
+		buyPower = 40 + (buyRatio * 20) // 映射到40-60区间
+	} else {
+		buyPower = 50 // 默认中性
+	}
 
-	// 成交量变化率
-	volumeChange := (data.Buy5m+data.Sell5m)/((data.Buy15m+data.Sell15m)/3+1e-6) - 1
+	// 买卖力量变化趋势 - 使用更温和的计算方式
+	var buyTrend float64 = 0
 
-	// 成交量得分标准化
-	bounds := a.config["volChangeBounds"].([]float64)
-	lowerBound, upperBound := bounds[0], bounds[1]
-	volumeScore := math.Max(0, math.Min(volumeChange-lowerBound, upperBound-lowerBound)/(upperBound-lowerBound)*100)
+	if data.Buy15m+data.Sell15m > 0 && data.Buy5m+data.Sell5m > 0 {
+		buyRatio5m := data.Buy5m / (data.Buy5m + data.Sell5m)
+		buyRatio15m := data.Buy15m / (data.Buy15m + data.Sell15m)
 
-	// 资金流向得分
-	flowScore := buyPower*0.7 + volumeScore*0.3
+		// 计算变化率并限制在合理范围内
+		buyTrend = buyRatio5m - buyRatio15m
 
-	// 资金集中度：短期交易量占比
-	shortTermRatio := (data.Buy5m + data.Sell5m) / (data.Buy24h + data.Sell24h + 1e-6) * 288
-	concentration := math.Max(0, math.Min(shortTermRatio, 1)*100)
+		// 缩放到适当范围 (-20到+20)，但避免过度放大
+		if buyTrend > 0 {
+			buyTrend = math.Min(buyTrend*100, 20)
+		} else {
+			buyTrend = math.Max(buyTrend*100, -20)
+		}
+	}
 
-	return flowScore*0.7 + concentration*0.3
+	// 成交量变化率 - 平滑处理极端值
+	var volumeScore float64 = 50 // 默认中性值
+
+	if data.Buy15m+data.Sell15m > 0 {
+		// 5分钟成交量与15分钟平均值对比
+		volumeRatio := (data.Buy5m + data.Sell5m) / ((data.Buy15m + data.Sell15m) / 3)
+
+		// 对数变换，使极端值更平滑
+		if volumeRatio > 0 {
+			// 对数变换后缩放到0-100区间
+			logVolChange := math.Log10(math.Max(volumeRatio, 0.1))
+			// 将-1到1的对数值映射到25-75的分数区间
+			volumeScore = 50 + logVolChange*25
+			// 确保在有效范围内
+			volumeScore = math.Max(25, math.Min(volumeScore, 75))
+		}
+	}
+
+	// 成交量突变检测 - 更温和的影响
+	volumeSpike := 0.0
+	if data.Buy15m+data.Sell15m > 0 {
+		volumeRatio := (data.Buy5m + data.Sell5m) / ((data.Buy15m + data.Sell15m) / 3)
+		if volumeRatio > 2.0 {
+			// 成交量突增，但限制最大影响
+			volumeSpike = math.Min((volumeRatio-2.0)*5, 10)
+		} else if volumeRatio < 0.5 {
+			// 成交量骤减，但限制最大影响
+			volumeSpike = math.Max((volumeRatio-0.5)*10, -10)
+		}
+	}
+
+	// 资金流向得分 - 考虑买卖力量、趋势和成交量，每个因素的权重和影响更均衡
+	flowScore := buyPower*0.5 + buyTrend*0.3 + volumeScore*0.2 + volumeSpike
+
+	// 确保分数在0-100范围内
+	return math.Max(0, math.Min(flowScore, 100))
 }
 
 // calculateSentimentScore 计算多空情绪得分
 func (a *MarketAnalyzer) calculateSentimentScore(data *CoinData) float64 {
-	// 多空比评分，直接用longRatio和shortRatio
-	// longRatio、shortRatio分别代表多头和空头人数占比，longShortRatio为多空资金比
-	longRatio := data.LongShortRatio        // 资金多空比
-	personLongRatio := data.LongShortRatio  // 兼容老字段，实际应为data.LongRatio
-	personShortRatio := 1 - personLongRatio // 若API有longRatio/shortRatio字段可直接用
+	// 多空比评分，直接用longRatio
+	longRatio := data.LongShortRatio // 资金多空比
+	// personLongRatio := data.LongShortRatio  // 兼容老字段，实际应为data.LongRatio
 
-	// 多空比评分：资金多空比接近1为中性，>1偏多，<1偏空
-	lsRatioScore := 100 - math.Abs(longRatio-1)/0.5*100
-	lsRatioScore = math.Max(0, math.Min(lsRatioScore, 100))
+	// 多空比动态评分：基于当前市场状态的偏离度
+	// 在震荡市场中，longRatio接近1最好；在趋势市场中，偏离度大可能更好
+	lsRatioDynamicScore := 0.0
 
-	// 人数多空比评分（如有longRatio/shortRatio字段）
-	personScore := 100 * (personLongRatio - personShortRatio + 1) / 2 // -1~1映射到0~100
-	personScore = math.Max(0, math.Min(personScore, 100))
+	// 根据价格变化趋势判断市场状态
+	isTrendMarket := math.Abs(data.PriceChangeM15) > 0.3 || math.Abs(data.PriceChangeM5) > 0.15
 
-	// 资金费率评分
+	if isTrendMarket {
+		// 趋势市场 - 多空比与价格变化同向为佳
+		if (data.PriceChangeM5 > 0 && longRatio > 1.1) || (data.PriceChangeM5 < 0 && longRatio < 0.9) {
+			lsRatioDynamicScore = 80 + (math.Min(math.Abs(longRatio-1), 0.5)/0.5)*20
+		} else {
+			// 多空比与价格变化方向不一致，可能是反转信号
+			lsRatioDynamicScore = 40 - (math.Min(math.Abs(longRatio-1), 0.5)/0.5)*20
+		}
+	} else {
+		// 震荡市场 - 多空比接近1为佳
+		lsRatioDynamicScore = 100 - math.Abs(longRatio-1)/0.5*100
+		lsRatioDynamicScore = math.Max(0, math.Min(lsRatioDynamicScore, 100))
+	}
+
+	// 资金费率评分 - 短期内资金费率变化不大，但仍有指示意义
 	bounds := a.config["fundingBounds"].([]float64)
 	lowerBound, upperBound := bounds[0], bounds[1]
 	fundingScore := math.Max(0, math.Min(data.FundingRate-lowerBound, upperBound-lowerBound)/(upperBound-lowerBound)*100)
 
 	// 综合多空情绪得分
-	return lsRatioScore*0.5 + personScore*0.2 + fundingScore*0.3
+	return lsRatioDynamicScore*0.8 + fundingScore*0.2
 }
 
 // calculateTechnicalScore 计算技术指标得分
 func (a *MarketAnalyzer) calculateTechnicalScore(data *CoinData) float64 {
-	// RSI信号
-	rsiSignal := 0.0
-	for _, rsi := range []float64{data.RsiM5, data.RsiM15} {
-		if rsi >= 40 && rsi <= 60 {
-			// 中性区间
-			rsiSignal += 50 + (rsi-50)*2
-		} else if rsi < 40 {
-			// 超卖区间
-			rsiSignal += 10 + (rsi-30)*4
-		} else {
-			// 超买区间
-			rsiSignal += 90 - (rsi-60)*4
-		}
-	}
-	rsiSignal /= 2 // 平均得分
+	// RSI信号 - 更关注5分钟RSI
+	rsiM5Score := 0.0
+	rsiM15Score := 0.0
 
-	// 波动率趋势
-	volTrend := data.VolatilityM5 / (data.VolatilityM15 + 1e-6)
-	volScore := 0.0
-	if volTrend > 1.2 {
-		volScore = 70 + (math.Min(volTrend, 2)-1.2)/0.8*30
+	// 5分钟RSI信号 - 短期更敏感的阈值
+	if data.RsiM5 <= 30 {
+		// 严重超卖
+		rsiM5Score = 80 + (30-data.RsiM5)*0.67 // 最高到100
+	} else if data.RsiM5 <= 40 {
+		// 轻度超卖
+		rsiM5Score = 60 + (40-data.RsiM5)*2 // 60-80之间
+	} else if data.RsiM5 >= 70 {
+		// 严重超买
+		rsiM5Score = 20 - (data.RsiM5-70)*0.67 // 最低到0
+	} else if data.RsiM5 >= 60 {
+		// 轻度超买
+		rsiM5Score = 40 - (data.RsiM5-60)*2 // 20-40之间
 	} else {
-		volScore = 70 - (1-volTrend/1.2)*70
+		// 中性区间 40-60
+		rsiM5Score = 50 + (data.RsiM5-50)*0.5 // 45-55之间，接近50分
 	}
 
-	return rsiSignal*0.6 + volScore*0.4
+	// 15分钟RSI信号 - 作为辅助确认
+	if data.RsiM15 <= 30 {
+		rsiM15Score = 80 + (30-data.RsiM15)*0.67
+	} else if data.RsiM15 <= 40 {
+		rsiM15Score = 60 + (40-data.RsiM15)*2
+	} else if data.RsiM15 >= 70 {
+		rsiM15Score = 20 - (data.RsiM15-70)*0.67
+	} else if data.RsiM15 >= 60 {
+		rsiM15Score = 40 - (data.RsiM15-60)*2
+	} else {
+		rsiM15Score = 50 + (data.RsiM15-50)*0.5
+	}
+
+	// RSI背离检测 - 价格与RSI方向不一致可能是重要信号
+	rsiDivergence := 0.0
+	if (data.PriceChangeM5 > 0 && data.RsiM5 < data.RsiM15) ||
+		(data.PriceChangeM5 < 0 && data.RsiM5 > data.RsiM15) {
+		rsiDivergence = -20.0 // RSI背离，看作反转信号
+	}
+
+	// 波动率趋势 - 波动率放大通常预示行情加速
+	volRatio := data.VolatilityM5 / (data.VolatilityM15 + 1e-6)
+	volScore := 0.0
+	if volRatio > 1.3 {
+		// 波动率显著放大，可能是突破或急跌
+		volScore = 70 + (math.Min(volRatio, 2)-1.3)/0.7*30
+
+		// 结合价格方向判断
+		if math.Abs(data.PriceChangeM5) > 0.1 {
+			volScore += 10 // 价格变化明显时波动率放大更有意义
+		}
+	} else if volRatio < 0.7 {
+		// 波动率收缩，可能酝酿大行情
+		volScore = 40 - (0.7-volRatio)/0.3*20
+	} else {
+		// 波动率平稳
+		volScore = 40 + (volRatio-0.7)/0.6*30
+	}
+
+	// 计算最终技术分数 - 偏重5分钟RSI
+	return rsiM5Score*0.6 + rsiM15Score*0.2 + volScore*0.2 + rsiDivergence
 }
 
 // calculateLiquidationScore 计算清算压力得分
@@ -564,17 +700,31 @@ func (a *MarketAnalyzer) calculateLiquidationScore(data *CoinData) float64 {
 	liqShort := data.LiquidationH1Short
 	liqTotal := data.LiquidationH1
 
-	// 清算强度：总清算额标准化（如有更长周期可对比）
-	liqIntensity := math.Max(0, math.Min(liqTotal/1e6, 1)*100) // 0~100，1e6为经验阈值
+	// 清算强度：总清算额标准化（针对短期影响调整）
+	liqIntensity := math.Max(0, math.Min(liqTotal/5e5, 1)*100) // 阈值调整为50万，更敏感
 
-	// 多空清算比：空头清算/多头清算，>1说明多头更强
-	liqBias := 50.0
-	if liqLong+liqShort > 0 {
-		liqBias = (liqShort / (liqLong + liqShort)) * 100 // 空头清算占比
+	// 多空清算比例和方向
+	liqDirection := 50.0
+	if liqLong+liqShort > 1e4 { // 确保有足够清算量再计算方向
+		// 空头清算占比高表示空头被迫平仓多，利好多头
+		liqDirection = (liqShort / (liqLong + liqShort)) * 100
+	}
+
+	// 大量单向清算的额外影响
+	liqBias := 0.0
+	if liqTotal > 1e5 { // 大于10万的清算
+		if liqShort > liqLong*3 {
+			// 空头大量清算，可能引发短期拉升
+			liqBias = 20.0
+		} else if liqLong > liqShort*3 {
+			// 多头大量清算，可能引发短期下跌
+			liqBias = -20.0
+		}
 	}
 
 	// 综合清算压力得分
-	return liqIntensity*0.4 + liqBias*0.6
+	score := liqIntensity*0.3 + liqDirection*0.5 + liqBias
+	return math.Max(0, math.Min(score, 100))
 }
 
 // GetTrendSummary 获取趋势摘要信息
@@ -600,5 +750,55 @@ func (a *MarketAnalyzer) GetTrendSummary(data *CoinData) string {
 		rating = "强烈看跌"
 	}
 
-	return fmt.Sprintf("趋势得分: %.1f/100 - %s", score, rating)
+	return fmt.Sprintf("%.1f/100 - %s", score, rating)
+}
+
+// 发送钉钉自定义机器人消息 markdown
+func SendDingTalkCustomMessage(title string, message string) error {
+	type MarkdownMessage struct {
+		Title string `json:"title"`
+		Text  string `json:"text"`
+	}
+	type DingTalkMessage struct {
+		MsgType  string          `json:"msgtype"`
+		Markdown MarkdownMessage `json:"markdown,omitempty"`
+	}
+	// Title取第一行
+	// 构建钉钉消息
+	msg := DingTalkMessage{
+		MsgType: "markdown",
+		Markdown: MarkdownMessage{
+			Title: title,
+			Text:  message,
+		},
+	}
+
+	// 序列化消息
+	jsonData, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("序列化钉钉消息失败: %v", err)
+	}
+
+	// 发送HTTP请求
+	response, err := http.Post(dingWebhook, "application/json", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("发送钉钉消息失败: %v", err)
+	}
+	defer response.Body.Close()
+
+	// 检查响应状态
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("钉钉API返回错误状态码: %d", response.StatusCode)
+	}
+	// 检查响应内容
+	var responseBody map[string]interface{}
+	if err := json.NewDecoder(response.Body).Decode(&responseBody); err != nil {
+		return fmt.Errorf("解析钉钉API响应失败: %v", err)
+	}
+	if responseBody["errcode"] != nil && responseBody["errcode"].(float64) != 0 {
+		return fmt.Errorf("钉钉API返回错误: %v", responseBody["errmsg"])
+	}
+
+	return nil
+
 }
